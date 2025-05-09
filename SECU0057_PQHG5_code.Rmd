@@ -1,0 +1,867 @@
+---
+title: "Applied Data Science Project"
+author: "PQHG5"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# set up working directory
+setwd("~/Desktop/Applied Data Science Stuff")
+# load relevant libraries
+library(RSelenium)
+library(dplyr)
+library(rvest)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(tidytext)
+library(textdata)
+library(lubridate)
+library(sentimentr)
+library(knitr)
+library(kableExtra)
+library(stats)
+library(quanteda)
+library(quanteda.textplots)
+library(quanteda.textstats)
+```
+
+### Data Collection
+Web scraping for hate crime related articles from {Guardian, Independent, The Sun, BBC...}
+  Should I use their API? Dynamic/Static webscraping 
+    Ended up choosing rselenium
+```{r setting up remote driver, echo=FALSE, results='hide'}
+#make a connection
+randomport = as.integer(sample(1024:49151, 1)) #assigned random port to avoid conflicts with other processes
+selenium_firefox <- rsDriver(browser="firefox", port =randomport , chromever = NULL)
+#start a driver to simulate a browser
+remote_driver <- selenium_firefox$client # remote drived is created to be a virtual browser to navigate and interact with web pages
+```
+
+STRAT (for bbc articles, repeat for other news sources): 
+Navigate to the search results for "hate crime"
+Repeat for all 29 pages: ("/search?q=hate+crime&d=NEWS_PS&page=1" )
+  extract urls 
+  
+For each url:
+  Navigate there and yoink main body text, title, publishing date...
+
+# Scraping Articles From BBC
+```{r scraping bbc article urls related to hate crime}
+target_url <- 'https://www.bbc.co.uk/search?d=NEWS_PS'
+# navigate to the target URL
+remote_driver$navigate(target_url)
+# find search bar element
+page_body<- remote_driver$findElement(using = "id", value ="searchInput")
+# enter search query 
+page_body$sendKeysToElement(list("hate crime", key='enter'))
+
+
+index = 1
+# retrieving all urls from search result
+repeat {
+  print(index)
+  index = index + 1
+  bbc_pagesource <- remote_driver$getPageSource()[[1]]
+  # obtain urls of search result
+  all_indiv_pages <- read_html(bbc_pagesource) %>%
+                    html_elements("main") %>%
+                    html_elements("a[class*='-PromoLink'].exn3ah95")%>%
+                    html_attr('href')
+  # save url to a vector
+  url = c(url, all_indiv_pages)
+  # stop when there is no more next page button to press
+  next_exists <- tryCatch({
+    next_button <- remote_driver$findElement(using = "xpath",value = "//a[.//span[text()='next page']]") 
+    TRUE}, 
+    error = function(e) FALSE)
+  if (!next_exists) {
+      message("No more pages to click.")
+      break
+  }
+  # find and click next page button
+  next_button <- remote_driver$findElement(using = "xpath",value = "//a[.//span[text()='next page']]")
+  next_button$clickElement()
+  Sys.sleep(2)
+}
+```
+
+```{r scraping bbc article texts, results='hide'}
+# initialise dataframe for scraped data
+bbc_df <- data.frame(
+  url = character(),
+  date = character(),
+  title = character(), 
+  text = character(),
+  stringsAsFactors = FALSE
+)
+
+guardiandata <- data.frame(date = ..., title = ..., text = ...)
+
+
+# scrape the content from webpages of scraped bbc urls
+i = 0 
+for (u in url) {
+  i = i + 1
+  print(i)
+  # navigate to the webpage of url u
+  remote_driver$navigate(u)
+  # waiting for page elements to load
+  Sys.sleep(2)
+  bbc_pagesource <- remote_driver$getPageSource()[[1]]
+  # scrape article title
+  article_title <- read_html(bbc_pagesource) %>%
+                html_elements("h1") %>%
+                html_text2()
+  # scrape article date
+  article_date <- read_html(bbc_pagesource) %>%
+                html_elements("time") %>%
+                html_text2()
+  # scrape article main text
+  content <- read_html(bbc_pagesource) %>%
+                    html_elements("main") %>%
+                    html_elements("p") %>%
+                    html_text2()
+  # Collapse all paragraphs into a single text block
+  full_text <- paste(content, collapse = "\n")
+  # warn + help trouble shoot when something unexpected 
+  if (length(article_date) == 0 || length(article_title) == 0 || length(content) == 0) {
+    print("hmmm, something went wrong!")
+    print(u)
+    next
+  }
+  # append to scraped data to dataframe
+  bbc_df <- rbind(bbc_df, data.frame(url = u, date = article_date, title = article_title, text = full_text, stringsAsFactors = FALSE))
+}
+```
+
+# Scraping Guardian Article URLs
+here we follow a similar stratergy
+get urls, then the main body text
+```{r scraping urls from guardian, results='hide'}
+target_url <- 'https://www.theguardian.com/society/hate-crime'
+#navigate to the target URL
+remote_driver$navigate(target_url)
+guardian_urls = c()
+
+
+index = 1
+repeat {
+  print(index)
+  index = index + 1
+  guardian_pagesource <- remote_driver$getPageSource()[[1]]
+  # scrape url of search result
+  links <- read_html(guardian_pagesource) %>%
+                  html_elements("main") %>%
+                  html_elements("a.dcr-2yd10d")%>%
+                  html_attr('href')
+  guardian_urls = c(guardian_urls, links)
+  # stop when reaching final page (button class = dcr-jh1m5g) also belongs to prev page button
+  if (index == 26) {
+      message("No more pages to click.")
+      break
+    }
+  # there are two buttons with the same class name
+  next_button <- remote_driver$findElements(using = "class",value = "dcr-jh1m5g")
+  # we wish to use the last one to navigate to the next page
+  next_button[[length(next_button)]]$clickElement()
+  Sys.sleep(2)
+}
+```
+
+```{r scraping body text guardian articles, results='hide'}
+# initialise dataframe to save scraped data
+guardian_df <- data.frame(
+  url = character(),
+  date = character(),
+  title = character(), 
+  text = character(),
+  stringsAsFactors = FALSE
+)
+
+# scrape article data using scraped urls
+i = 0
+for (u in guardian_urls){
+  i = i + 1
+  print(i)
+  # combine incomplete scraped urls with "https://www.theguardian.com"
+  l = paste("https://www.theguardian.com", u, sep="")
+  # navigate to url l
+  remote_driver$navigate(l)
+  Sys.sleep(1)
+  guardian_pagesource <- remote_driver$getPageSource()[[1]]
+  # scrape main body content
+  content <- read_html(guardian_pagesource) %>%
+                html_elements("main") %>%
+                html_elements("p.dcr-16w5gq9") %>%
+                html_text2()
+  # scrape title
+  article_title <- read_html(guardian_pagesource) %>%
+                html_elements("h1") %>%
+                html_text2()
+  # scrape date
+  article_date <- read_html(guardian_pagesource) %>%
+                html_elements("span.dcr-u0h1qy, div.dcr-1pexjb9") %>%
+                html_text2()
+  # collapse all paragraphs into a single text block
+  full_text <- paste(content, collapse = "\n")
+  # warn + help trouble shoot when something unexpected 
+  if (length(article_date) == 0 || length(article_title) == 0 || length(content) == 0) {
+    print("hmmm, something went wrong!")
+    print(l)
+    next
+  }
+  # append scraped data to dataframe
+  guardian_df <- rbind(guardian_df, data.frame(url = l, title = article_title, date = article_date, text = full_text, stringsAsFactors = FALSE))
+}
+article_date
+article_title
+content
+```
+
+# Scraping Articles from The Independent
+```{r scraping urls from independent search results}
+target_url <- 'https://www.independent.co.uk'
+remote_driver$navigate(target_url)
+Sys.sleep(3)
+# the search box seems to take a really long time to load :(
+# if it is still unavailable, click the accept cookies and wait for the search input to load
+independent_pagesource <- remote_driver$getPageSource()[[1]]
+search_box <- remote_driver$findElement(using = "id", "gsc-i-id1")
+search_box$sendKeysToElement(list("hate crime", key='enter'))
+
+independent_allurls <- c()
+
+# scrape all urls from the first page of search result
+independent_urls <- read_html(independent_pagesource) %>%
+                  html_elements("a.gs-title")%>%
+                  html_attr('href')
+independent_allurls <- c(independent_allurls, independent_urls)
+
+# scrape the rest of the urls
+for (i in 2:10) {
+  print(i)
+  # find and click of page i of the search result
+  xpath <- sprintf("//div[@class='gsc-cursor-page' and @aria-label='Page %d']", i)
+  pageElem <- remote_driver$findElement(using = "xpath", value = xpath)
+  pageElem$clickElement()
+  # scrape url of that search page
+  independent_pagesource <- remote_driver$getPageSource()[[1]]
+  independent_urls <- read_html(independent_pagesource) %>%
+                  html_elements("a.gs-title")%>%
+                  html_attr('href')
+  independent_allurls <- c(independent_allurls, independent_urls)
+  Sys.sleep(1)
+}
+# remove duplicates and NAs
+independent_allurls <- na.omit(independent_allurls)
+independent_allurls <- unique(independent_allurls)            
+
+# scrape the urls of the topic pages
+independent_urls_with_topic <- independent_allurls[grepl("topic", independent_allurls)]
+for (i in independent_urls_with_topic) {
+  print(i)
+  remote_driver$navigate(i)
+  independent_pagesource <- remote_driver$getPageSource()[[1]]
+  independent_urls <- read_html(independent_pagesource) %>%
+                  html_elements("a.sc-oq6ovx-0.ldEUYw.title, a.sc-oq6ovx-0.glRZrA.title")%>%
+                  html_attr('href')
+  independent_allurls <- c(independent_allurls, independent_urls)
+}
+
+# add https://www.independent.co.uk to the beginning of the urls obtained
+j = 71
+for (i in independent_allurls[71:length(independent_allurls)]) {
+  independent_allurls[j] <- paste("https://www.independent.co.uk", i, sep = "")
+  j = j+1
+}
+# ensure all urls are unique + no NAs and remove the urls that directs to topics pages (already scraped)
+independent_allurls <- independent_allurls[!grepl("topic", independent_allurls)]
+independent_allurls <- na.omit(independent_allurls)
+independent_allurls <- unique(independent_allurls)            
+```
+
+```{r scraping independent articles, results='hide'}
+# initialise dataframe
+independent_df <- data.frame(
+  url = character(),
+  date = character(),
+  title = character(), 
+  text = character(),
+  stringsAsFactors = FALSE
+)
+
+# scraping independent article data 
+i = 1
+for (u in independent_allurls) {
+  print(i)
+  i = i + 1
+  # navigate to url u
+  remote_driver$navigate(u)
+  Sys.sleep(1)
+  independent_pagesource <- remote_driver$getPageSource()[[1]]
+  # scrape article title
+  article_title <- read_html(independent_pagesource) %>%
+                html_elements("h1") %>%
+                html_text2()
+  # scrape article date
+  article_date <- read_html(independent_pagesource) %>%
+                html_elements("#article-published-date") %>%
+                html_text2()
+  # scrape article main content
+  content <- read_html(independent_pagesource) %>%
+                html_elements("#main") %>%
+                html_elements("p:not(.sc-y4bm30-15)") %>%
+                html_text2() 
+  # collapse all paragraphs into a single text block
+  full_text <- paste(content, collapse = "\n")
+  # warn + help trouble shoot when something unexpected 
+  if (length(article_date) == 0 || length(article_title) == 0 || length(content) == 0) {
+    next
+  }
+  # append scraped data to df
+  independent_df <- rbind(independent_df, data.frame(url = u, date = article_date, title = article_title, text = full_text, stringsAsFactors = FALSE))
+}
+```
+
+# Scraping Articles from The Sun
+```{r Scraping Articles from The Sun}
+target_url <- 'https://www.thesun.co.uk/'
+# navigate to the sun's main page
+remote_driver$navigate(target_url)
+# find and click on searchbar element
+search_placeholder <- remote_driver$findElement(using = "css selector",value = "div.header-search-placeholder-container")
+search_placeholder$clickElement()
+search_input <- remote_driver$findElement(using = "css selector", value = "input[data-cy='header-search-input']")
+# input query and press enter
+search_input$sendKeysToElement(list("hate crime", key='enter'))
+
+
+sun_urls = c()
+# scraping urls from the sun search results
+index = 1
+repeat {
+  print(index)
+  index = index + 1
+  sun_pagesource <- remote_driver$getPageSource()[[1]]
+  # scrape all relevant urls from the page
+  sun_links <- read_html(sun_pagesource) %>%
+                  html_elements("a.text-anchor-wrap")%>%
+                  html_attr('href')
+  # save to vector
+  sun_urls = c(sun_urls, sun_links)
+  # stop at page 50 (the sun has a lot of articles available, way more than the other outlets)
+  if (index == 50) { 
+      message("Sufficient URLs collected.")
+      break
+  }
+  # find and click next page button
+  next_button <- remote_driver$findElement( using = "css selector", value = "a.pagination-next")
+  next_button$clickElement()
+
+  Sys.sleep(2)
+}
+
+# initialise dataframe
+sun_df <- data.frame(
+  url = character(),
+  date = character(),
+  title = character(), 
+  text = character(),
+  stringsAsFactors = FALSE
+)
+
+# scrape web content from scraped urls
+for (u in sun_urls) {
+  l = paste('https://www.thesun.co.uk', u, sep="")
+  remote_driver$navigate(l)
+  print(l)
+  Sys.sleep(1)
+  sun_pagesource <- remote_driver$getPageSource()[[1]]
+  # scrape article title
+  article_title <- read_html(sun_pagesource) %>%
+                html_elements("h1.article__headline") %>%
+                html_text2()
+  # scrape article date
+  article_date <- read_html(sun_pagesource)  %>%
+                html_element("li.article__published time .article__timestamp") %>%
+                html_text2()
+  # scrape article content
+  content <- read_html(sun_pagesource) %>%
+                html_elements("div.article__content") %>%
+                html_elements("p") %>%
+                html_text2() 
+  # collapse all paragraphs into a single text block
+  full_text <- paste(content, collapse = "\n")
+  # warn + help trouble shoot when something unexpected 
+  if (length(article_date) == 0 || length(article_title) == 0 || length(content) == 0) {
+    print("hmm")
+    next
+  }
+  # append to dataframe
+  sun_df <- rbind(sun_df, data.frame(url = l, date = article_date, title = article_title, text = full_text, stringsAsFactors = FALSE))
+}
+```
+
+```{r parsing all date entries into the same format}
+# Parsing sun date
+parsed_date <- dmy(sun$date)
+sun$date <- format(parsed_date, "%Y-%b-%d")
+# Parsing bbc date
+parsed_date <- dmy(bbc$date)
+bbc$date <- format(parsed_date, "%Y-%b-%d")
+# Parsing guardian date
+guardian$date <- gsub("(\\d{2})\\.(\\d{2})", "\\1:\\2", guardian$date)
+date_str <- sub(" [A-Za-z]+$", "", guardian$date)
+parsed_date <- parse_date_time(date_str, orders = "a d b Y H.M")
+guardian$date <- format(parsed_date, "%Y-%b-%d")
+# Parsing independent date
+independent$date <- gsub("(\\d{2})\\.(\\d{2})", "\\1:\\2", independent$date)
+date_str <- sub(" [A-Za-z]+$", "", independent$date)
+parsed_date <- parse_date_time(date_str, orders = "a d b Y H.M")
+independent$date <- format(parsed_date, "%Y-%b-%d")
+```
+
+```{r closing the sesh}
+# close rselenium sesh and server
+remote_driver$close()
+selenium_firefox$server$stop()
+
+
+
+write.csv(data, "data.csv", row.names = FALSE)
+
+guardiandata <- data.frame(date = request.crimesec$web_publication_date, title = request.crimesec$web_title, main = request.crimesec$main, body = request.crimesec$body)
+write.csv(guardiandata, "data.csv", row.names = FALSE)
+
+
+# Saving the dataframes in case the session dies (commented so I don't mess up)
+#write.csv(bbc_df, "bbc.csv", row.names = FALSE)
+#write.csv(guardian_df, "guardian.csv", row.names = FALSE)
+#write.csv(sun_df, "sun.csv", row.names = FALSE)
+#write.csv(independent_df, "independent.csv", row.names = FALSE)
+```
+### Data Overview
+```{r Data Overview}
+all_data = read.csv("SECU0057_PQHG5_data_final.csv", header = TRUE)
+# get data count for each outlet
+overview <- all_data %>%
+  group_by(label) %>%
+  summarise(count = n())
+# bar plot data count vs outlet
+ggplot(overview, aes(x = label, y = count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Outlet", y = "Article Count", title = "Total Articles Webscraped from each Media Outlet") +
+  theme_minimal()
+
+# parse data into year and save to a new column
+all_data$date <- as.Date(all_data$date)
+all_data$year <- year(all_data$date)
+# compute frequencies w respect to outlet and year
+data_date_overview <- all_data %>%
+  group_by(label, year) %>%
+  summarise(count = n()) %>%
+  filter(!is.na(year))
+# bar plot of data count by year and news outlet
+ggplot(data_date_overview, aes(x = factor(year), y = count, fill = label)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Frequency of Articles by Year and News Outlet", x = "Year", y = "Number of Articles", fill = "News Source") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +  # Rotate x-axis labels
+  scale_color_manual(values = c("bbc" = "orange", "guardian" = "blue", "sun" = "red", "independent" = "green")) 
+```
+
+
+### Data Mining
+
+```{r Labelling the dataset (article source) ###no need to run this part}
+# processing webscraped data and combining them into one dataframe
+# adding label columns to the dataframes
+bbc$label <- "bbc"
+sun$label <- "sun"
+guardian$label <- "guardian"
+independent$label <- "independent"
+all_data <- rbind(guardian, independent, sun, bbc)
+# remove duplicates
+all_data <- all_data[!duplicated(all_data), ]
+all_data <- all_data %>% filter(text != "")
+# save final data frame as csv
+###write.csv(all_data, "SECU0057_PQHG5_data_final.csv", row.names = FALSE) #(commentedx3 to avoid tragedy)
+```
+
+```{r readability score across outlets}
+# load corpus
+news_corp <- corpus(all_data$text)
+# get readability score for each article
+news_readability <- textstat_readability(news_corp, measure=c("Flesch","Flesch.Kincaid","Coleman.Liau.short"))
+# save scores to main dataframe
+all_data$flesch <- news_readability$Flesch
+all_data$fleschKincaid <- news_readability$Flesch.Kincaid
+all_data$colemanLiaushort <- news_readability$Coleman.Liau.short
+# get average (all three) read score for each outlet
+news_readability$label <- all_data$label
+average_read_per_outlet <- news_readability %>%
+  group_by(label) %>%
+  summarise(across(Flesch:Coleman.Liau.short, mean, na.rm = TRUE))
+# make prettier table for report
+average_read_per_outlet %>%
+  kable(digits = 2, 
+        caption = "Average Readability Scores per Outlet",
+        col.names = c("News Outlet", "Flesch Score", "Flesch-Kincaid Grade", "Coleman-Liau Index")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#f7f7f7")
+```
+
+```{r word cloud}
+# Tokenised corpus
+news_corpus_tokenised <- tokens(news_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("english"), "bbc", "guardian","independent","sun"))
+# create dfm from tokenised corpus
+news_dfm <- dfm(news_corpus_tokenised)
+# add labels column to dfm
+news_dfm$label <- all_data$label
+# get topfeatures of dfm for each outlet
+topfeatures(dfm_subset(news_dfm, label == "bbc"))
+topfeatures(dfm_subset(news_dfm, label == "sun"))
+topfeatures(dfm_subset(news_dfm, label == "independent"))
+topfeatures(dfm_subset(news_dfm, label == "guardian"))
+# produce word cloud for each outlet
+textplot_wordcloud(dfm_subset(news_dfm, label == "bbc"), max_words = 100, main = "BBC")
+textplot_wordcloud(dfm_subset(news_dfm, label == "sun"), max_words = 100, main = "Sun")
+textplot_wordcloud(dfm_subset(news_dfm, label == "independent"), max_words = 100, main = "Independent")
+textplot_wordcloud(dfm_subset(news_dfm, label == "guardian"), max_words = 100, main = "Guardian")
+
+```
+
+```{r Sentiment Analysis: Overall Sentiment}
+# Sentiment analysis per document
+sentiment_scores <- sentiment_by(all_data$text)
+all_data$overall_sentiment_score <- sentiment_scores$ave_sentiment
+sentiment_scores$label <- all_data$label
+# plotting article main text sentiment score
+ggplot(sentiment_scores, aes(x = word_count, y = ave_sentiment, color = label)) +
+  geom_point(size = 1) +  
+  labs(title = "Article Word Count vs Article Sentiment Score", x = "Word Count", y = "Sentiment Score") +
+  theme_minimal() +
+  scale_color_manual(values = c("bbc" = "orange", "guardian" = "blue", "sun" = "red", "independent" = "green")) 
+
+# plotting headline sentiment score vs body sentiment score
+heading_sentiment_scores <- sentiment_by(all_data$title)
+all_data$title_sentiment_score <- heading_sentiment_scores$ave_sentiment
+ggplot(all_data, aes(x = overall_sentiment_score, y = title_sentiment_score, color = label)) +
+  geom_point(size = 1) +  
+  labs(title = "Scatter Plot for Article Headline Sentiment Score vs Main Text Sentiment Score", x = "Main Text Sentiment Score", y = "Headline Sentiment Score") +
+  theme_minimal() +
+  scale_color_manual(values = c("bbc" = "orange", "guardian" = "blue", "sun" = "red", "independent" = "green")) 
+
+```
+
+```{r nrc emotion scores for each article}
+# tokenise, remove stopwords and lowercase
+news_corpus_tokenised <- tokens(news_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(stopwords("english"), "bbc", "also", "guardian","independent","sun"))
+# load nrc_lexicon
+nrc_lexicon <- lexicon_nrc()
+# convert to dictionary format
+nrc_dict <- nrc_lexicon %>%
+  group_by(sentiment) %>%
+  summarise(words = list(word)) %>%
+  deframe()
+# create a quanteda dictionary object
+nrc_dict <- dictionary(nrc_dict)
+# apply NRC dictionary to the tokens
+dfm_nrc <- dfm(news_corpus_tokenised) %>%
+  dfm_lookup(dictionary = nrc_dict)
+# convert dfm to dataframe
+emotion_counts <- convert(dfm_nrc, to = "data.frame") %>%
+  rename(article_id = doc_id)
+emotion_counts$label <- all_data$label
+# calculate word count for each article
+total_words_per_article <- ntoken(news_corpus_tokenised)
+emotion_counts$total_words <- total_words_per_article
+all_data$word_count <- total_words_per_article
+# normalize emotion scores for each article (per emotion)
+emotion_counts_normalized <- emotion_counts %>%
+  mutate(across(starts_with("anger"):starts_with("trust"), 
+                ~ (. / total_words) * 1000))
+# average the normalized emotion scores per outlet
+average_scores_per_outlet <- emotion_counts_normalized %>%
+  group_by(label) %>%
+  summarise(across(anger:trust, mean, na.rm = TRUE))
+# convert into long format for ggplot
+average_scores_per_outlet_long <- pivot_longer(average_scores_per_outlet, cols = -label, names_to = "emotion", values_to = "score")
+# plot bars for avearage emotion score for each outlet
+ggplot(average_scores_per_outlet_long, aes(x = emotion, y = score, fill = label)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Average Emotion Score per 1000 Words by Source", x = "Emotion", y = "Score") +
+  scale_fill_manual(values = c("bbc" = "orange","guardian" = "blue","sun" = "red","independent" = "green")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
+### Machine Learning
+```{r data subsetting and normalisation}
+# Extract necessary data
+ml_data <- all_data %>%
+  select(word_count, overall_sentiment_score, flesch, fleschKincaid, colemanLiaushort)
+# Normalise data
+ml_data_normalized <- scale(ml_data)
+```
+
+
+```{r kmeans without ngrams}
+# initialise within-cluster sum of sq list
+wss <- numeric()
+# repeat for k = 1 to 10
+for (k in 1:10) {
+  # initialise temporary vector for mean calculation
+  temp <- c()
+  for(j in 1:10) {
+      print(paste("k = ", k))
+      # Assign cluster
+      kmeans_model_temp <- kmeans(x = ml_data_normalized,
+                                 centers = k,
+                                 iter.max = 10,
+                                 nstart = 10)
+      # save to vector
+      temp <- c(temp, kmeans_model_temp$tot.withinss)
+  }
+  # average wcss and save to list
+  wss[k] <- mean(temp)
+}
+# plot wcss against k
+k = 1:10
+wss_df_1 <- data.frame(k, wss)
+ggplot(wss_df_1, aes(x = k, y = wss)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "red", size = 2) +
+  labs(title = "Within-Cluster Sum of Squares at Different k", x = "Number of Clusters (k)", y = "Within-Cluster Sum of Squares") +
+  scale_x_continuous(breaks = 1:10) + 
+  theme_minimal()
+
+# fit four-means model
+kmeans_model <- kmeans(x = ml_data_normalized,
+                                 centers = 4,
+                                 iter.max = 10,
+                                 nstart = 10)
+# convert feauture df to matrix
+full_feature_matrix <- as.matrix(ml_data_normalized)
+# plot PCA projection
+pca_result <- prcomp(full_feature_matrix, scale. = TRUE)
+pca_df <- data.frame(pca_result$x[, 1:2], cluster = factor(kmeans_model$cluster))
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "K-Means Clusters (PCA Projection)")
+
+# copy relevant columns to new dataframe
+comparison_data <- ml_data
+comparison_data$cluster <- kmeans_model$cluster
+comparison_data$label <- all_data$label
+# compute average for each feature
+summary<- comparison_data %>% 
+  group_by(cluster) %>%
+  summarise(
+    article_count = n(),
+    avg_length = mean(word_count, na.rm = TRUE),
+    avg_sentiment = mean(overall_sentiment_score, na.rm = TRUE),
+    avg_reading_score = mean(fleschKincaid, na.rm = TRUE),
+  )
+# prettify table for report
+summary %>%
+  kable(digits = 2, caption = "Average Word Count, Setiment Score, Readability Score per Cluster") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#f7f7f7")
+
+# compute proportion of outlet in clusters
+composition <- comparison_data %>%
+  group_by(cluster, label) %>%
+  summarise(count = n()) %>%
+  ungroup()
+# bar plot proportions
+ggplot(composition, aes(x = cluster, y = count, fill = label)) +
+  geom_bar(stat = "identity", position = "fill") +  # use "fill" for proportions
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Cluster Composition by Label", y = "Proportion", x = "Cluster") +
+  scale_fill_manual(values = c("bbc" = "orange","guardian" = "blue","sun" = "red","independent" = "green")) +
+  theme_minimal()
+```
+
+
+
+
+###### IMPORTANT!!! FOLLOWING CODE AND PLOTS are not used in the final report
+### The following code and plots were scrapped from the report due to concerns regarding page limit and overlap in method usage
+### Though it would be interesting to include ngrams as feature
+```{r ngram kmeans models: grid search}
+# grid search
+wss <- matrix(numeric(), nrow = 10, ncol = 5)
+for(i in 1:5) {
+  print(paste("i = ", i))
+  # Compute ngrams and tfidf
+  news_ngrams_tfidf <- news_corp %>%
+    tokens(remove_punct = T) %>% 
+    tokens_remove(c(stopwords(), "bbc", "guardian","independent","sun")) %>% 
+    tokens_ngrams(i) %>% 
+    dfm() %>%
+    dfm_tfidf(scheme_tf = 'count', scheme_df = 'inverse', k=1)
+  # Find top 50 features
+  top_terms <- names(topfeatures(news_ngrams_tfidf, n = 50))
+  # Select top 50 features from the ngram tfidf dfm
+  news_ngrams_tfidf <- dfm_select(news_ngrams_tfidf, pattern = top_terms)
+  for(k in 1:10) {
+    temp = c()
+    for(j in 1:10) {
+      print(paste("k = ", k))
+      # Assign cluster
+      kmeans_model_temp <- kmeans(x = cbind(news_ngrams_tfidf, ml_data_normalized),
+                                 centers = k,
+                                 iter.max = 10,
+                                 nstart = 10)
+      temp <- c(temp, kmeans_model_temp$tot.withinss)
+      }
+    wss[k , i] <- mean(temp)
+    }
+}
+
+# Convert the matrix into a data frame
+wss_df <- as.data.frame(wss)
+# Add a column for 'k' values (1 to 10)
+colnames(wss_df) <- paste("n =", 1:5)
+wss_df$k <- 1:10
+# Reshape the data for ggplot
+wss_df_long <- wss_df %>%
+  gather(key = "ngram", value = "wss_value", -k)
+# Plot wss using ggplot2 faceted line plot
+ggplot(wss_df_long, aes(x = k, y = wss_value, group = ngram, color = ngram)) +
+  geom_line() +  
+  geom_point() +  
+  facet_wrap(~ ngram, scales = "free_y") +  
+  theme_minimal() +
+  labs(title = "Elbow Method for Different N-grams",
+       x = "Number of Clusters (k)",
+       y = "Within-Cluster Sum of Squares (WSS)") +
+  scale_x_continuous(breaks = 1:10) + 
+  theme(legend.position = "none")
+
+```
+
+```{r bigram kmeans model}
+# Bigram model
+
+news_bigrams_tfidf <- news_corp %>%
+    tokens(remove_punct = T) %>% 
+    tokens_remove(c(stopwords(), "bbc", "guardian","independent","sun")) %>% 
+    tokens_ngrams(2) %>% 
+    dfm() %>%
+    dfm_tfidf(scheme_tf = 'count', scheme_df = 'inverse', k=1)
+# Find top 50 features
+top_terms <- names(topfeatures(news_bigrams_tfidf, n = 50))
+# Select top 50 features from the ngram tfidf dfm
+news_bigrams_tfidf <- dfm_select(news_bigrams_tfidf, pattern = top_terms)
+bigram_kmeans_model <- kmeans(x = cbind(news_bigrams_tfidf, ml_data_normalized),
+                                 centers = 3,
+                                 iter.max = 10,
+                                 nstart = 10)
+# Convert dfm to a matrix
+tfidf_matrix <- as.matrix(news_bigrams_tfidf)
+full_feature_matrix <- cbind(tfidf_matrix, ml_data_normalized)
+# PCA projection
+pca_result <- prcomp(full_feature_matrix, scale. = TRUE)
+pca_df <- data.frame(pca_result$x[, 1:2], cluster = factor(bigram_kmeans_model$cluster))
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Bigram K-Means Clusters (PCA Projection)")
+
+# Article Cluster Composition
+bigram_comparison_data <- ml_data
+bigram_comparison_data$cluster <- bigram_kmeans_model$cluster
+bigram_comparison_data$label <- all_data$label
+bigram_composition <- bigram_comparison_data %>%
+  group_by(cluster, label) %>%
+  summarise(count = n()) %>%
+  ungroup()
+ggplot(bigram_composition, aes(x = cluster, y = count, fill = label)) +
+  geom_bar(stat = "identity", position = "fill") +  # use "fill" for proportions
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Cluster Composition by Label", y = "Proportion", x = "Cluster") +
+  scale_fill_manual(values = c("bbc" = "orange","guardian" = "blue","sun" = "red","independent" = "green")) +
+  theme_minimal()
+
+# Article count in each cluster
+summary<- bigram_comparison_data %>% 
+  group_by(cluster) %>%
+  summarise(
+    article_count = n(),
+  )
+summary %>%
+  kable(digits = 2, caption = "Cluster Article Count") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#f7f7f7")
+```
+
+```{r fourgram kmeans models}
+# Fourgram model
+news_fourgrams_tfidf <- news_corp %>%
+    tokens(remove_punct = T) %>% 
+    tokens_remove(c(stopwords(), "bbc", "guardian","independent","sun")) %>% 
+    tokens_ngrams(4) %>% 
+    dfm() %>%
+    dfm_tfidf(scheme_tf = 'count', scheme_df = 'inverse', k=1)
+# Find top 50 features
+top_terms <- names(topfeatures(news_fourgrams_tfidf, n = 50))
+# Select top 50 features from the ngram tfidf dfm
+news_fourgrams_tfidf <- dfm_select(news_fourgrams_tfidf, pattern = top_terms)
+fourgram_kmeans_model <- kmeans(x = cbind(news_fourgrams_tfidf, ml_data_normalized),
+                                 centers = 4,
+                                 iter.max = 10,
+                                 nstart = 10)
+
+# Convert dfm to a matrix
+tfidf_matrix <- as.matrix(news_fourgrams_tfidf)
+full_feature_matrix <- cbind(tfidf_matrix, ml_data_normalized)
+# PCA projection
+pca_result <- prcomp(full_feature_matrix, scale. = TRUE)
+pca_df <- data.frame(pca_result$x[, 1:2], cluster = factor(fourgram_kmeans_model$cluster))
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Fourgram K-Means Clusters (PCA Projection)")
+
+# Article Cluster Composition
+fourgram_comparison_data <- ml_data
+fourgram_comparison_data$cluster <- fourgram_kmeans_model$cluster
+fourgram_comparison_data$label <- all_data$label
+fourgram_composition <- fourgram_comparison_data %>%
+  group_by(cluster, label) %>%
+  summarise(count = n()) %>%
+  ungroup()
+ggplot(fourgram_composition, aes(x = cluster, y = count, fill = label)) +
+  geom_bar(stat = "identity", position = "fill") +  # use "fill" for proportions
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Cluster Composition by Label", y = "Proportion", x = "Cluster") +
+  scale_fill_manual(values = c("bbc" = "orange","guardian" = "blue","sun" = "red","independent" = "green")) +
+  theme_minimal()
+
+# Article count in each cluster
+summary<- fourgram_comparison_data %>% 
+  group_by(cluster) %>%
+  summarise(
+    article_count = n(),
+  )
+summary %>%
+  kable(digits = 2, caption = "Cluster Article Count") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#f7f7f7")
+
+```
+  
+
