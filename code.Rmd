@@ -1,6 +1,6 @@
 ---
-title: "Applied Data Science Project"
-author: "PQHG5"
+title: "Exploring hate crime media coverage across major UK-based media outlets."
+author: "Jie"
 date: "`r Sys.Date()`"
 output: html_document
 ---
@@ -444,7 +444,7 @@ write.csv(guardiandata, "data.csv", row.names = FALSE)
 ```
 ### Data Overview
 ```{r Data Overview}
-all_data = read.csv("SECU0057_PQHG5_data_final.csv", header = TRUE)
+all_data = read.csv("scraped_data.csv", header = TRUE)
 # get data count for each outlet
 overview <- all_data %>%
   group_by(label) %>%
